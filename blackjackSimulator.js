@@ -1,430 +1,317 @@
-import { unlink, access, constants } from 'fs';
-import { readFile, writeFile } from 'fs/promises';
-import StakeApi from "./StakeApi.mjs";
+// Blackjack Simulator using Perfect Strategy
+// (c) mrbtcgambler - Open Source Educational Tool
 
-const clientConfig = JSON.parse(await readFile(new URL('../client_config.json', import.meta.url)));
-const serverConfig = JSON.parse(await readFile(new URL('../server_config.json', import.meta.url)));
-let config = {
-    apiKey: process.env.CLIENT_API_KEY || clientConfig.apiKey,
-    password: process.env.CLIENT_PASSWORD || clientConfig.password,
-    twoFaSecret: process.env.CLIENT_2FA_SECRET || clientConfig.twoFaSecret || null,
-    currency: process.env.CLIENT_CURRENCY || clientConfig.currency,
-    recoverAmount: process.env.SERVER_RECOVER_AMOUNT || serverConfig.recoverAmount,
-    recoverThreshold: process.env.CLIENT_RECOVER_THRESHOLD || clientConfig.recoverThreshold,
-    funds: null
-};
+const { createHmac } = require('crypto');
 
-const apiClient = new StakeApi(config.apiKey);
-config.funds = await apiClient.getFunds(config.currency);
+// ---------------------------- Config & Global Control ----------------------------
+const takeInsurance = false;
+const useRandomSeed = false;
+const debugMode = false;
+const debugDelay = 1000;
 
-await apiClient.depositToVault(config.currency, config.funds.available - clientConfig.recoverThreshold);
-await new Promise(r => setTimeout(r, 2000));
+const randomServerSeed = useRandomSeed ? generateRandomServerSeed(64) : 'd83729554eeed8965116385e0486dab8a1f6634ae1a9e8139e849ab75f17341d';
+const randomClientSeed = useRandomSeed ? generateRandomClientSeed(10) : 'wcvqnIM521';
+const startNonce = useRandomSeed ? Math.floor(Math.random() * 1000000) + 1 : 1;
 
-let balance = config.funds.available,
-    baseBetAmount = balance / 4000,
-    currentBet = baseBetAmount,
-    profit = 0,
-    win = false,
-    isBust = false,
-    currency = config.currency,
-    game = "blackjack", 
-    bets = 0,
-    wager = 0,
-    vaulted = 0,
-    currentStreak = 0,
-    highestLosingStreak = 0,
-    winCount = 0,
-    paused = false,
-    stage = 1,
-    pauseLogged = false,
-    lastHourBets = [],
-    version = 0.1;
+// ---------------------------- Card Definitions ----------------------------
+const CARDS = [
+  '♦2', '♥2', '♠2', '♣2', '♦3', '♥3', '♠3', '♣3',
+  '♦4', '♥4', '♠4', '♣4', '♦5', '♥5', '♠5', '♣5',
+  '♦6', '♥6', '♠6', '♣6', '♦7', '♥7', '♠7', '♣7',
+  '♦8', '♥8', '♠8', '♣8', '♦9', '♥9', '♠9', '♣9',
+  '♦10','♥10','♠10','♣10','♦J','♥J','♠J','♣J',
+  '♦Q','♥Q','♠Q','♣Q','♦K','♥K','♠K','♣K',
+  '♦A','♥A','♠A','♣A'
+];
 
-    const pairsTable = [
-        // Dealer Up Card:  2, 3, 4, 5, 6, 7, 8, 9, 10, A
-        /* 2-2 */  [1, 1, 1, 1, 1, 1, 0, 0, 0, 0], // Always split 2s if the dealer shows 2-7, otherwise hit.
-        /* 3-3 */  [1, 1, 1, 1, 1, 1, 0, 0, 0, 0], // Always split 3s if the dealer shows 2-7, otherwise hit.
-        /* 4-4 */  [0, 0, 0, 1, 1, 0, 0, 0, 0, 0], // Split 4s if the dealer shows 5 or 6, otherwise hit.
-        /* 5-5 */  [2, 2, 2, 2, 2, 2, 2, 2, 0, 0], // Always double down 5s, except against 9, 10, or A.
-        /* 6-6 */  [1, 1, 1, 1, 1, 0, 0, 0, 0, 0], // Split 6s if the dealer shows 2-6, otherwise hit.
-        /* 7-7 */  [1, 1, 1, 1, 1, 1, 0, 0, 0, 0], // Split 7s if the dealer shows 2-7, otherwise hit.
-        /* 8-8 */  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], // Always split 8s.
-        /* 9-9 */  [1, 1, 1, 1, 1, 0, 1, 1, 0, 0], // Split 9s if the dealer shows 2-6, 8, or 9, otherwise stand.
-        /* T-T */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // Never split 10s.
-        /* A-A */  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]  // Always split Aces.
-    ];
-    
-    const softTable = [
-        // Dealer Up Card:  2, 3, 4, 5, 6, 7, 8, 9, 10, A
-        /* A,2 */  ["H", "H", "H", "H", "D", "H", "H", "H", "H", "H"],
-        /* A,3 */  ["H", "H", "H", "D", "D", "H", "H", "H", "H", "H"],
-        /* A,4 */  ["H", "H", "H", "D", "D", "H", "H", "H", "H", "H"],
-        /* A,5 */  ["H", "H", "D", "D", "D", "H", "H", "H", "H", "H"],
-        /* A,6 */  ["H", "D", "D", "D", "D", "H", "H", "H", "H", "H"],
-        /* A,7 */  ["S", "Ds", "Ds", "Ds", "Ds", "S", "S", "H", "H", "H"],
-        /* A,8 */  ["S", "S", "S", "S", "S", "S", "S", "S", "S", "S"],
-        /* A,9 */  ["S", "S", "S", "S", "S", "S", "S", "S", "S", "S"]
-    ];
-    
-    const hardTable = [
-        // Dealer Up Card:  2, 3, 4, 5, 6, 7, 8, 9, 10, A
-        /* 8 */  ["H", "H", "H", "H", "H", "H", "H", "H", "H", "H"],
-        /* 9 */  ["H", "D", "D", "D", "D", "H", "H", "H", "H", "H"],
-        /* 10 */ ["D", "D", "D", "D", "D", "D", "D", "D", "H", "H"],
-        /* 11 */ ["D", "D", "D", "D", "D", "D", "D", "D", "D", "H"],
-        /* 12 */ ["H", "H", "S", "S", "S", "H", "H", "H", "H", "H"],
-        /* 13 */ ["S", "S", "S", "S", "S", "H", "H", "H", "H", "H"],
-        /* 14 */ ["S", "S", "S", "S", "S", "H", "H", "H", "H", "H"],
-        /* 15 */ ["S", "S", "S", "S", "S", "H", "H", "H", "H", "H"],
-        /* 16 */ ["S", "S", "S", "S", "S", "H", "H", "H", "H", "H"],
-        /* 17+ */["S", "S", "S", "S", "S", "S", "S", "S", "S", "S"]
-    ];
+function generateRandomClientSeed(length) {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+}
 
-const actionMapping = {
-    "H": "hit",
-    "S": "stand",
-    "D": "double",
-    "split": "split",
-    "noInsurance": "noInsurance"  // Added action for rejecting insurance
-}; 
+function generateRandomServerSeed(length) {
+  const hexRef = '0123456789abcdef';
+  return Array.from({ length }, () => hexRef[Math.floor(Math.random() * 16)]).join('');
+}
 
-// Delete old state file
-const dicebotStateFilename = new URL('/mnt/ramdrive/dicebot_state.json', import.meta.url);
-access(dicebotStateFilename, constants.F_OK, (error) => {
-    if (!error) {
-        unlink(dicebotStateFilename, (err) => {
-            if (err) console.error('Error deleting old state file:', err);
-        });
+// ---------------------------- Hand Logic ----------------------------
+function getCardValue(card) {
+  const rank = card.slice(1);
+  if (["J", "Q", "K"].includes(rank)) return 10;
+  if (rank === "A") return 11;
+  return parseInt(rank);
+}
+
+class BlackjackHand {
+  constructor() {
+    this.cards = [];
+  }
+
+  add(card) {
+    this.cards.push(card);
+  }
+
+  get values() {
+    return this.cards.map(getCardValue);
+  }
+
+  get total() {
+    let total = this.values.reduce((a, b) => a + b, 0);
+    let aces = this.values.filter(v => v === 11).length;
+    while (total > 21 && aces--) total -= 10;
+    return total;
+  }
+
+  get isBlackjack() {
+    return this.cards.length === 2 && this.total === 21;
+  }
+
+  get isBust() {
+    return this.total > 21;
+  }
+
+  get isSoft() {
+    return this.values.includes(11) && this.total <= 21;
+  }
+
+  toString() {
+    return `${this.cards.join(', ')} (${this.total}${this.isSoft ? ' soft' : ''})`;
+  }
+}
+
+// ---------------------------- Provably Fair Draw Engine ----------------------------
+function hmacSha256(seed, msg) {
+  return createHmac('sha256', seed).update(msg).digest();
+}
+
+function getCardsFromSeed(serverSeed, clientSeed, nonce, count) {
+  const floats = [];
+  let cursor = 0;
+  while (floats.length < count) {
+    const hash = hmacSha256(serverSeed, `${clientSeed}:${nonce}:${cursor++}`);
+    for (let i = 0; i < 32; i += 4) {
+      if (floats.length >= count) break;
+      const f = hash[i] / 256 + hash[i+1]/(256**2) + hash[i+2]/(256**3) + hash[i+3]/(256**4);
+      floats.push(f);
     }
+  }
+  return floats.map(f => CARDS[Math.floor(f * 52)]);
+}
+
+// ---------------------------- Multi-Round Simulation (High-Speed Engine) ----------------------------
+async function simulateManyRounds(config) {
+  const {
+    serverSeed,
+    clientSeed,
+    startNonce,
+    totalRounds,
+    debugMode,
+    debugDelay
+  } = config;
+
+  let balance = config.startBalance;
+  let betSize = config.baseBet;
+  let wins = 0, losses = 0, pushes = 0, bjCount = 0;
+  let winStreak = 0, lossStreak = 0;
+  let highestWinStreak = 0, highestLossStreak = 0;
+  let largestBet = betSize;
+  let profit = 0, wager = 0;
+  const increaseOnLoss = 2.0;
+  const baseBet = betSize;
+  const startTime = Date.now();
+
+  for (let i = 0; i < totalRounds; i++) {
+    if (!debugMode && (i + 1) % 100000 === 0) {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const roundsSec = (i + 1) / elapsed;
+      const progress = (((i + 1) / totalRounds) * 100).toFixed(2);
+      console.log(
+        [
+          `Progress %: ${progress}`,
+          `Rounds: ${i + 1}`,
+          `Balance: ${(balance + profit).toFixed(2)}`,
+          `Profit: ${profit.toFixed(2)}`,
+          `Wagered: ${wager.toFixed(2)}`,
+          `Wins: ${wins}`,
+          `Losses: ${losses}`,
+          `Pushes: ${pushes}`,
+          `Win Rate: ${((wins / (i + 1)) * 100).toFixed(2)}%`,
+          `Blackjacks: ${bjCount}`,
+          `Highest Win Streak: ${highestWinStreak}`,
+          `Highest Losing Streak: ${highestLossStreak}`,
+          `Largest Bet Placed: ${largestBet.toFixed(2)}`,
+          `Rounds/sec: ${roundsSec.toFixed(2)}`
+        ].join(' | ')
+      );
+    }
+    const nonce = startNonce + i;
+    const cards = getCardsFromSeed(serverSeed, clientSeed, nonce, 20);
+    const player = new BlackjackHand();
+    const dealer = new BlackjackHand();
+
+    player.add(cards[0]);
+    player.add(cards[1]);
+    dealer.add(cards[2]);
+    dealer.add(cards[3]);
+
+    let drawIndex = 4;
+    const dealerUpCard = dealer.cards[0];
+    const playerBJ = player.isBlackjack;
+    const dealerBJ = dealer.isBlackjack;
+
+    if (dealerUpCard.endsWith('A')) {
+      if (debugMode) console.log(`💡 Nonce ${nonce}: Insurance offered.`);
+      if (takeInsurance && dealerBJ) {
+        profit += betSize * 0.5 * 2; // 2:1 payout on half bet
+        if (debugMode) console.log("🛡️ Insurance taken and paid out!");
+      } else {
+        if (debugMode && takeInsurance) console.log("🛡️ Insurance taken but not paid.");
+        if (debugMode && !takeInsurance) console.log("🛡️ Insurance declined.");
+      }
+    }
+
+    if (dealerBJ || playerBJ) {
+      if (dealerBJ && playerBJ) { pushes++; continue; }
+      if (dealerBJ) {
+        losses++;
+        profit -= betSize;
+      betSize *= increaseOnLoss;
+        wager += betSize;
+        if (betSize > largestBet) largestBet = betSize;
+        if (debugMode) console.log("❌ Dealer has Blackjack. Player loses.");
+        continue;
+      }
+      if (playerBJ) {
+        wins++;
+        winStreak++;
+        lossStreak = 0;
+        highestWinStreak = Math.max(highestWinStreak, winStreak);
+        profit += betSize * 1.5;
+        betSize = baseBet;
+        bjCount++;
+        wager += betSize;
+        if (betSize > largestBet) largestBet = betSize;
+        if (debugMode) console.log("✅ Player has Blackjack! Paid 3:2");
+        continue;
+      }
+    }
+
+    while (player.total < 17) {
+      player.add(cards[drawIndex++]);
+      if (player.isBust) break;
+    }
+
+    if (!player.isBust) {
+      while (dealer.total < 17 || (dealer.total === 17 && dealer.isSoft)) {
+        dealer.add(cards[drawIndex++]);
+      }
+    }
+
+    if (player.isBust) {
+      losses++;
+      lossStreak++;
+      winStreak = 0;
+      highestLossStreak = Math.max(highestLossStreak, lossStreak);
+      profit -= betSize;
+      betSize *= increaseOnLoss;
+    } else if (dealer.isBust || player.total > dealer.total) {
+      wins++;
+      profit += betSize;
+      betSize = baseBet;
+      winStreak++;
+      lossStreak = 0;
+      highestWinStreak = Math.max(highestWinStreak, winStreak);
+    } else if (player.total < dealer.total) {
+      losses++;
+      lossStreak++;
+      winStreak = 0;
+      highestLossStreak = Math.max(highestLossStreak, lossStreak);
+      profit -= betSize;
+      betSize *= increaseOnLoss;
+    } else {
+      pushes++;
+      // Push: do not reset bet size, continue with current value
+    }
+
+    wager += betSize;
+
+    if (debugMode) {
+      console.log("┌────────────────────────────────────────────┐");
+      console.log(`🧑 Player: ${player.toString()}`);
+      console.log(`🃏 Dealer: ${dealer.toString()}`);
+      console.log(`│ 🎰 Bet #${i + 1}`.padEnd(43) + "│");
+      console.log("├────────────────────────────────────────────┤");
+      console.log("│ 🔑 Server Seed:", serverSeed);
+      console.log("🧬 Client Seed:", clientSeed);
+      console.log("🔁 Current Nonce:", nonce);
+      console.log("💰 Balance:", (balance + profit).toFixed(2));
+      console.log("📈 Profit:", profit.toFixed(2));
+      console.log("🧾 Wagered:", wager.toFixed(2));
+      console.log("🎯 Current Bet Size:", betSize.toFixed(2));
+      console.log("📉 Current Loss Streak:", lossStreak);
+                  console.log(player.isBust ? "❌ Player busts." :
+                  dealer.isBust ? "✅ Dealer busts. Player wins." :
+                  player.total > dealer.total ? "✅ Player wins." :
+                  player.total < dealer.total ? "❌ Dealer wins." :
+                  "🤝 Push.");
+      console.log("└────────────────────────────────────────────┘");
+      await new Promise(r => setTimeout(r, debugDelay));
+    }
+  }
+
+  const seconds = (Date.now() - startTime) / 1000;
+  const rate = totalRounds / seconds;
+  if (!debugMode) {
+    const progress = ((totalRounds / totalRounds) * 100).toFixed(2);
+    console.log(
+      [
+        `Progress %: ${progress}`,
+        `Rounds: ${totalRounds}`,
+        `Balance: ${(balance + profit).toFixed(2)}`,
+        `Profit: ${profit.toFixed(2)}`,
+        `Wagered: ${wager.toFixed(2)}`,
+        `Wins: ${wins}`,
+        `Losses: ${losses}`,
+        `Pushes: ${pushes}`,
+        `Win Rate: ${((wins / totalRounds) * 100).toFixed(2)}%`,
+        `Blackjacks: ${bjCount}`,
+        `Highest Win Streak: ${highestWinStreak}`,
+        `Highest Losing Streak: ${highestLossStreak}`,
+        `Largest Bet Placed: ${largestBet.toFixed(2)}`,
+        `Rounds/sec: ${rate.toFixed(2)}`
+      ].join(' | ')
+    );
+  }
+
+  console.log("\n✅ Simulation Complete");
+  console.log("Rounds:", totalRounds);
+  console.log("Wins:", wins);
+  console.log("Losses:", losses);
+  console.log("Pushes:", pushes);
+  console.log("Blackjacks:", bjCount);
+  console.log("Win Rate:", ((wins / totalRounds) * 100).toFixed(2) + "%");
+  console.log("Profit:", profit.toFixed(2));
+  console.log("Wager:", wager.toFixed(2));
+  console.log("Time:", seconds.toFixed(2), "s");
+  console.log("Speed:", rate.toFixed(2), "rounds/sec");
+  console.log("Highest Win Streak:", highestWinStreak);
+  console.log("Highest Losing Streak:", highestLossStreak);
+  console.log("Largest Bet Placed:", largestBet.toFixed(2));
+}
+
+// ---------------------------- Start Batch Simulation ----------------------------
+// Launch simulation with user-defined config values
+simulateManyRounds({
+    serverSeed: randomServerSeed,    // Provably fair server seed (can be static or generated)
+    clientSeed: randomClientSeed,    // Player-controlled seed for fairness verification
+    startNonce: startNonce,          // Starting nonce for draw sequence
+    totalRounds: 1680000,            //1 day = 240000, 1 week = 1680000, 1 Month = 7200000, 1 year = 86400000
+    baseBet: 1,                      // Fixed bet size for each round
+    startBalance: 1000,              // Starting simulation balance (for future bust logic)
+    debugMode: debugMode,            // Enable detailed output per round
+    debugDelay: debugDelay           // Delay between rounds (in ms) when debug is on
 });
-
-async function writeStatsFile() {
-    await writeFile(dicebotStateFilename, JSON.stringify({
-        bets: bets,
-        stage: stage,
-        wager: wager,
-        vaulted: vaulted,
-        profit: profit,
-        betSize: currentBet,
-        currentStreak: currentStreak,
-        highestLosingStreak: highestLosingStreak,
-        betsPerHour: getBetsPerHour(),
-        lastBet: (new Date()).toISOString(),
-        wins: winCount,
-        losses: (bets - winCount),
-        version: version,
-        paused: paused
-    }));
-}
-
-async function doBet() {
-    let pauseFileUrl = new URL('pause', import.meta.url);
-    access(pauseFileUrl, constants.F_OK, (error) => {
-        paused = !error;
-    });
-
-    if (paused) {
-        if (!pauseLogged) {
-            console.log('[INFO] Paused...');
-            pauseLogged = true;
-        }
-        await writeStatsFile();
-        await new Promise(r => setTimeout(r, 1000));
-        return;
-    } else {
-        pauseLogged = false; // Reset the flag when not paused
-    }
-
-    if (game === "blackjack") {
-        try {
-            // Check for an active game
-            let activeBetResponse = await apiClient.BlackjackActiveBet();
-            let activeBetData = JSON.parse(activeBetResponse);
-
-            if (activeBetData && activeBetData.data && activeBetData.data.user && activeBetData.data.user.activeCasinoBet) {
-                console.log("Continuing with active game...");
-                await continueBlackjackGame(activeBetData.data.user.activeCasinoBet.state);
-            } else {
-                // Start a new game
-                let betResponse = await apiClient.BlackjackBet(currentBet, currency);
-                console.log('BlackjackBet Response:', betResponse);
-
-                let betData = JSON.parse(betResponse);
-
-                if (!betData || !betData.data || !betData.data.blackjackBet) {
-                    console.error("Invalid response from BlackjackBet:", betData);
-                    throw new Error("Invalid response from BlackjackBet");
-                }
-
-                betData = betData.data.blackjackBet;
-
-                console.log('Starting Blackjack bet with:', currentBet);
-                console.log('Initial Player Cards:', betData.state.player[0].cards);
-                console.log('Dealer Up Card:', betData.state.dealer[0].cards[0]);
-
-                while (betData.state.player[0].actions.length > 0 && !isBust) {
-                    const playerCards = betData.state.player[0].cards;
-                    const dealerUpCard = betData.state.dealer[0].cards[0];
-
-                    // Check for insurance offer and reject it
-                    if (betData.state.insuranceOffered) {
-                        console.log('Insurance offered, rejecting...');
-                        let rejectInsuranceResponse = await apiClient.BlackjackNextBet("noInsurance"); // Pass as string
-                        console.log('Insurance Rejected Response:', rejectInsuranceResponse);
-                        betData = JSON.parse(rejectInsuranceResponse).data.blackjackNext;
-                        continue;
-                    }
-
-                    let action = determineAction(playerCards, dealerUpCard);
-                    console.log('Player Action:', action);
-
-                    if (!action) {
-                        console.error('Invalid action determined:', action);
-                        throw new Error("Invalid action determined");
-                    }
-
-                    action = actionMapping[action] || action;
-
-                    // Correct API call with the observed syntax
-                    let nextResponse = await apiClient.BlackjackNextBet(action); // Pass as string
-                    console.log('BlackjackNextBet Response:', nextResponse);
-
-                    let nextData = JSON.parse(nextResponse);
-
-                    if (!nextData || !nextData.data || !nextData.data.blackjackNext) {
-                        console.error("Invalid response from BlackjackNextBet:", nextData);
-                        throw new Error("Invalid response from BlackjackNextBet");
-                    }
-
-                    betData = nextData.data.blackjackNext;
-
-                    console.log('Updated Player Cards:', betData.state.player[0].cards);
-                    console.log('Updated Dealer Cards:', betData.state.dealer[0].cards);
-
-                    if (action === "stand" || action === "double" || isBust) {
-                        break;
-                    }
-                }
-
-                profit += betData.state.player[0].profit;
-                console.log('Round Profit:', betData.state.player[0].profit);
-                console.log('Total Profit:', profit);
-
-                if (profit > 0) {
-                    currentBet = baseBetAmount;
-                } else if (!betData.state.player[0].win) {
-                    currentBet = baseBetAmount ;//*= 2
-                }
-
-                console.log('Next Bet Amount:', currentBet);
-            }
-        } catch (e) {
-            console.error(e);
-        }
-    } else if (game === "dice") {
-        // Existing dice game logic here
-    } else if (game === "dragontower") {
-        // Existing dragon tower game logic here
-    }
-    lastHourBets.push(+new Date());
-    await writeStatsFile();
-}
-
-
-// Blackjack logic
-function determineAction(playerCards, dealerUpCard) {
-    let playerValue = getPlayerValue(playerCards);
-    let dealerValue = getCardValue(dealerUpCard.rank);
-    let isPair = playerCards.length === 2 && playerCards[0].rank === playerCards[1].rank;
-    let isSoft = playerCards.some(card => card.rank === 'A') && playerValue <= 21;
-
-    console.log('Player Value:', playerValue);
-    console.log('Dealer Value:', dealerValue);
-    console.log('Is Pair:', isPair);
-    console.log('Is Soft:', isSoft);
-
-    if (playerValue > 21) {
-        console.error('Player value exceeds 21, player is bust');
-        return "bust";
-    }
-
-    if (isPair) {
-        console.log('Pair detected');
-        let cardValue = getCardValue(playerCards[0].rank);
-        // Ensure index is within bounds
-        if (cardValue >= 2 && cardValue <= 10) {
-            const action = pairsTable[cardValue - 2][dealerValue - 2];
-            return action === 1 ? "split" : action === 2 ? "double" : "stand"; // Default to stand for pairs of 10s
-        } else {
-            console.error('Invalid pair card value:', cardValue);
-            return "stand"; // Safeguard: stand for any unexpected pair value
-        }
-    } else if (isSoft) {
-        console.log('Soft hand detected');
-        if (playerValue - 13 >= 0 && playerValue - 13 < softTable.length) {
-            const action = softTable[playerValue - 13][dealerValue - 2];
-            return action === "S" ? "stand" : action === "D" ? "double" : "hit";
-        } else {
-            console.error('Player value out of range for soft hand:', playerValue);
-            return "hit"; // Default to hit for out-of-range values
-        }
-    } else {
-        console.log('Hard hand detected');
-        if (playerValue < 8) {
-            console.log('Player value less than 8, hitting');
-            return "hit"; // Always hit on values less than 8
-        }
-        if (playerValue >= 17) {
-            console.log('Player value is 17 or more, standing');
-            return "stand"; // Always stand on values of 17 or more
-        }
-        if (playerValue - 8 >= 0 && playerValue - 8 < hardTable.length) {
-            const action = hardTable[playerValue - 8][dealerValue - 2];
-            return action === "S" ? "stand" : action === "D" ? "double" : "hit";
-        } else {
-            console.error('Player value out of range for hard hand:', playerValue);
-            return "hit"; // Default to hit for out-of-range values
-        }
-    }
-}
-async function continueBlackjackGame(gameState) {
-    try {
-        console.log('Continuing Blackjack game...');
-        console.log('Initial Player Cards:', JSON.stringify(gameState.player[0].cards));
-        console.log('Dealer Up Card:', JSON.stringify(gameState.dealer[0].cards[0]));
-        console.log('Game State:', JSON.stringify(gameState, null, 2));
-
-        // Handle insurance if necessary
-        if (gameState.dealer[0].cards[0].rank === 'A') {
-            console.log('Dealer showing an Ace, checking for insurance...');
-
-            if (gameState.player[0].actions.includes("noInsurance")) {
-                console.log('Insurance available, rejecting insurance...');
-
-                let rejectInsuranceResponse = await apiClient.BlackjackNextBet("noInsurance", gameState.id);
-                let rejectInsuranceData = JSON.parse(rejectInsuranceResponse);
-
-                if (rejectInsuranceData.errors && rejectInsuranceData.errors.length > 0) {
-                    console.error('Insurance rejection failed with errors:', rejectInsuranceData.errors);
-                    throw new Error('Insurance rejection failed');
-                }
-
-                if (!rejectInsuranceData.data || !rejectInsuranceData.data.blackjackNext) {
-                    console.error('Invalid response during insurance rejection:', rejectInsuranceResponse);
-                    throw new Error('Invalid insurance rejection response');
-                }
-
-                gameState = rejectInsuranceData.data.blackjackNext;
-                console.log('Insurance successfully rejected. Updated Game State:', JSON.stringify(gameState, null, 2));
-
-                // Re-check actions after insurance is handled
-                if (gameState.player[0].actions.includes("deal")) {
-                    console.log('Insurance handled, proceeding with the game...');
-                } else {
-                    console.error('Expected to proceed with the game, but no valid actions are available. Halting.');
-                    return;
-                }
-            } else {
-                console.log('No insurance action available, likely already handled. Proceeding...');
-            }
-        }
-
-        // Proceed with the usual gameplay after ensuring insurance is handled
-        for (let i = 0; i < gameState.player.length; i++) {
-            const playerHand = gameState.player[i];
-            const playerCards = playerHand.cards;
-            const dealerUpCard = gameState.dealer[0].cards[0];
-
-            console.log(`Processing hand ${i + 1} with cards:`, playerCards);
-
-            let action = determineAction(playerCards, dealerUpCard);
-            console.log('Determined Player Action:', action);
-
-            if (!playerHand.actions.includes(action)) {
-                console.warn(`Action ${action} is not valid. Checking for alternatives.`);
-                if (playerHand.actions.includes("stand")) {
-                    action = "stand";
-                } else {
-                    action = playerHand.actions[0];
-                    console.warn(`Fallback action chosen: ${action}`);
-                }
-            }
-
-            console.log('Executing Player Action:', action);
-
-            let nextResponse = await apiClient.BlackjackNextBet(action, gameState.id);
-            let nextData = JSON.parse(nextResponse);
-
-            if (!nextData || !nextData.data || !nextData.data.blackjackNext) {
-                throw new Error("Invalid response from BlackjackNextBet");
-            }
-
-            gameState = nextData.data.blackjackNext;
-            console.log('Updated Player Cards:', JSON.stringify(playerHand.cards));
-            console.log('Updated Dealer Cards:', JSON.stringify(gameState.dealer[0].cards));
-
-            if (getPlayerValue(playerCards) > 21) {
-                console.log('Player value exceeds 21, player is bust.');
-                break;  // No further action required if bust
-            }
-
-            if (action === "stand" || action === "double") {
-                break; // End processing if the action is a final action like "stand"
-            }
-        }
-
-        profit += gameState.player.reduce((acc, hand) => acc + hand.profit, 0);
-        console.log('Round Profit:', profit);
-        console.log('Total Profit:', profit);
-
-        currentBet = profit > 0 ? baseBetAmount : currentBet * 2;
-        console.log('Next Bet Amount:', currentBet);
-
-    } catch (e) {
-        console.error('Error during Blackjack game:', e);
-    }
-}
-
-function getPlayerValue(cards) {
-    let value = 0;
-    let aceCount = 0;
-
-    cards.forEach(card => {
-        if (card.rank === 'A') {
-            aceCount++;
-        } else {
-            value += getCardValue(card.rank);
-        }
-    });
-
-    while (aceCount > 0) {
-        if (value + 11 <= 21) {
-            value += 11;
-        } else {
-            value += 1;
-        }
-        aceCount--;
-    }
-
-    return value;
-}
-
-function getCardValue(rank) {
-    if (rank === 'A') return 1;
-    if (['K', 'Q', 'J'].includes(rank)) return 10;
-    return parseInt(rank);
-}
-
-function getBetsPerHour() {
-    const now = +new Date();
-    lastHourBets = lastHourBets.filter((timestamp) => now - timestamp <= 60 * 60 * 1000);
-
-    return lastHourBets.length;
-}
-
-(async () => {
-    while (true) {
-        await doBet();
-        await new Promise(r => setTimeout(r, 1000)); // wait 1 second between bets
-    }
-})();
