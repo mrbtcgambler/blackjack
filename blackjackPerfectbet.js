@@ -9,6 +9,10 @@ const useRandomSeed = false;
 const debugMode = true; // Set to true for detailed round-by-round output
 const debugDelay = 1000;  // Delay in ms between rounds when debugMode is true
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const randomServerSeed = useRandomSeed ? generateRandomServerSeed(64) : 'd83729554eeed8965116385e0486dab8a1f6634ae1a9e8139e849ab75f17341d';
 const randomClientSeed = useRandomSeed ? generateRandomClientSeed(10) : 'wcvqnIM521';
 const startNonce = useRandomSeed ? Math.floor(Math.random() * 1000000) + 1 : 1;
@@ -199,7 +203,7 @@ function determinePerfectStrategy(playerHand, dealerUpcard) {
 }
 
 // ---------------------------- Start Batch Simulation ----------------------------
-function simulateManyRounds(config) {
+async function simulateManyRounds(config) {
   const {
     serverSeed,
     clientSeed,
@@ -257,25 +261,40 @@ function simulateManyRounds(config) {
     const playerBJ = player.isBlackjack;
     const dealerBJ = dealer.isBlackjack;
 
+    let totalStakedThisRound = nextRoundInitialBet;
+    let roundResult = "";
+    let roundOverDueToBJ = false;
+
     balance -= nextRoundInitialBet;
     wager += nextRoundInitialBet;
     if (nextRoundInitialBet > largestBetPlaced) largestBetPlaced = nextRoundInitialBet;
 
     if (dealerBJ || playerBJ) {
+      roundOverDueToBJ = true;
       if (dealerBJ && playerBJ) {
         pushes++;
         balance += nextRoundInitialBet;
+        roundResult = "🤝 PUSH (Both BJ)";
+        winStreak = 0;
+        lossStreak = 0;
       } else if (dealerBJ) {
         losses++;
+        lossStreak++;
+        if (lossStreak > highestLossStreak) highestLossStreak = lossStreak;
+        winStreak = 0;
         nextRoundInitialBet *= increaseOnLoss;
+        roundResult = "❌ LOSE (Dealer BJ)";
       } else if (playerBJ) {
         wins++;
         bjCount++;
+        winStreak++;
+        if (winStreak > highestWinStreak) highestWinStreak = winStreak;
+        lossStreak = 0;
         balance += nextRoundInitialBet * 2.5;
         nextRoundInitialBet = baseBet;
+        roundResult = "✅ WIN (Player BJ)";
       }
-      continue;
-    }
+    } else {
 
     let action;
     while (true) {
@@ -286,6 +305,7 @@ function simulateManyRounds(config) {
       } else if (action === 'D' && player.cards.length === 2 && balance >= nextRoundInitialBet) {
         balance -= nextRoundInitialBet;
         wager += nextRoundInitialBet;
+        totalStakedThisRound += nextRoundInitialBet;
         nextRoundInitialBet *= 2;
         player.add(cards[drawIndex++]);
         break;
@@ -300,18 +320,54 @@ function simulateManyRounds(config) {
 
     if (player.isBust) {
       losses++;
+      lossStreak++;
+      if (lossStreak > highestLossStreak) highestLossStreak = lossStreak;
+      winStreak = 0;
       nextRoundInitialBet *= increaseOnLoss;
+      roundResult = "❌ BUST";
     } else if (dealer.isBust || player.total > dealer.total) {
       wins++;
+      winStreak++;
+      if (winStreak > highestWinStreak) highestWinStreak = winStreak;
+      lossStreak = 0;
       balance += nextRoundInitialBet * 2;
       nextRoundInitialBet = baseBet;
+      roundResult = dealer.isBust ? "✅ WIN (Dealer Bust)" : "✅ WIN";
     } else if (player.total === dealer.total) {
       pushes++;
+      winStreak = 0;
+      lossStreak = 0;
       balance += nextRoundInitialBet;
+      roundResult = "🤝 PUSH";
     } else {
       losses++;
+      lossStreak++;
+      if (lossStreak > highestLossStreak) highestLossStreak = lossStreak;
+      winStreak = 0;
       nextRoundInitialBet *= increaseOnLoss;
+      roundResult = "❌ LOSE";
     }
+  }
+
+    if (debugMode) {
+      console.log("┌────────────────────────────────────────────┐");
+      console.log(`│ 🧑 Player: ${player.toString().padEnd(58)}│`);
+      console.log(`│ 🃏 Dealer: ${dealer.toString().padEnd(58)}│`);
+      console.log(`│ 🎰 Round #${(i + 1).toString().padEnd(58)}│`);
+      console.log("├────────────────────────────────────────────┤");
+      console.log(`│ 🔑 Server Seed: ${serverSeed.substring(0, 10)}....`.padEnd(58) + "│");
+      console.log(`│ 🧬 Client Seed: ${clientSeed.padEnd(58)}│`);
+      console.log(`│ 🔁 Current Nonce: ${nonce.toString().padEnd(58)}│`);
+      console.log(`│ 💰 Balance: ${balance.toFixed(2).padEnd(58)}│`);
+      console.log(`│ 📈 Profit: ${(balance - startBalance).toFixed(2).padEnd(58)}│`);
+      console.log(`│ 🧾 Stakes this round: ${totalStakedThisRound.toFixed(2)} (Total Sim Wager: ${wager.toFixed(2)})`.padEnd(58) + "│");
+      console.log(`│ 🎯 Next Round Bet: ${nextRoundInitialBet.toFixed(2).padEnd(58)}│`);
+      console.log(`│ 🔥 Win Streak: ${winStreak}, 🥶 Loss Streak: ${lossStreak}`.padEnd(58) + "│");
+      console.log(`│ ${roundResult.padEnd(58)}│`);
+      console.log("└────────────────────────────────────────────┘");
+      await sleep(debugDelay);
+    }
+
   }
 
   const endTime = Date.now();
