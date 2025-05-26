@@ -355,7 +355,7 @@ async function simulateManyRounds(config) {
       console.log(`│ 🃏 Dealer: ${dealer.toString().padEnd(58)}│`);
       console.log(`│ 🎰 Round #${(i + 1).toString().padEnd(58)}│`);
       console.log("├────────────────────────────────────────────┤");
-      console.log(`│ 🔑 Server Seed: ${serverSeed.substring(0, 10)}....`.padEnd(58) + "│");
+      console.log(`│ 🔑 Server Seed: ${serverSeed}....`.padEnd(58) + "│");
       console.log(`│ 🧬 Client Seed: ${clientSeed.padEnd(58)}│`);
       console.log(`│ 🔁 Current Nonce: ${nonce.toString().padEnd(58)}│`);
       console.log(`│ 💰 Balance: ${balance.toFixed(2).padEnd(58)}│`);
